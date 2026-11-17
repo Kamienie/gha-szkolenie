@@ -64,4 +64,3 @@ jobs:
             docker logs "$CID" || true
             docker rm -f "$CID" || true
           fi
-EOF
