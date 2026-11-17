@@ -1,0 +1,27 @@
+name: 06 – Pogoda
+
+on:
+  workflow_dispatch:
+    inputs:
+      city:
+        description: "Miasto, dla którego pobrać pogodę"
+        type: string
+        default: Krakow
+
+env:
+  MY_KLUCZYK: ${{ secrets.MY_KLUCZYK }}
+
+jobs:
+  pogoda:
+    name: Pobierz informacje o pogodzie
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./CWICZENIA/06-context/pogoda
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Uruchom start.sh
+        run: |
+          bash start.sh "${{ inputs.city }}" "${{ env.MY_KLUCZYK }}" >> "$GITHUB_STEP_SUMMARY"
