@@ -1,0 +1,98 @@
+name: "06-06 Pogoda API CI"
+
+on:
+  push:
+    branches:
+      - feature/06-pogoda-api
+      - main
+  pull_request:
+    branches:
+      - feature/06-pogoda-api
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    env:
+      LOCAL_IMAGE_NAME: python_pogoda:test
+      WORKDIR: ./CWICZENIA/06-context/pogoda_python_flusk
+
+    steps:
+      # Krok 1
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Krok 2
+      - name: Build Docker image
+        run: |
+          docker build -t "$LOCAL_IMAGE_NAME" "$WORKDIR"
+
+      # Krok 3
+      - name: Run container
+        run: |
+          docker run -d \
+            --name pogoda_api \
+            -p 8000:8000 \
+            -e OPENWEATHER_API_KEY="${{ secrets.OPENWEATHER_API_KEY }}" \
+            "$LOCAL_IMAGE_NAME"
+
+      # Krok 4
+      - name: Wait for API
+        run: |
+          echo "Czekam na start API..."
+          sleep 10
+
+      # Krok 5
+      - name: Test /weather endpoint
+        run: |
+          set -e
+          echo "Testowanie endpointu /weather..."
+          curl -f "http://localhost:8000/weather?city=Warsaw&api_key=${{ secrets.OPENWEATHER_API_KEY }}"
+          echo
+          echo "OK - endpoint /weather zwrócił odpowiedź 2xx."
+
+      # Krok 6
+      - name: Container logs (on failure)
+        if: failure()
+        run: |
+          echo "Logi kontenera:"
+          docker logs pogoda_api || true
+
+      # Krok 7
+      - name: Stop and remove container
+        if: always()
+        run: |
+          docker stop pogoda_api || true
+          docker rm pogoda_api || true
+
+      # Krok 8
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Krok 9
+      - name: Tag image for Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          HUB_IMAGE_BASE="${{ secrets.DOCKERHUB_USERNAME }}/python_pogoda"
+
+          echo "Taguję obraz:"
+          echo " - $HUB_IMAGE_BASE:Staszek"
+          echo " - $HUB_IMAGE_BASE:$SHORT_SHA"
+
+          docker tag "$LOCAL_IMAGE_NAME" "$HUB_IMAGE_BASE:Staszek"
+          docker tag "$LOCAL_IMAGE_NAME" "$HUB_IMAGE_BASE:$SHORT_SHA"
+
+      # Krok 10
+      - name: Push images to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          HUB_IMAGE_BASE="${{ secrets.DOCKERHUB_USERNAME }}/python_pogoda"
+
+          docker push "$HUB_IMAGE_BASE:Staszek"
+          docker push "$HUB_IMAGE_BASE:$SHORT_SHA"
