@@ -1,0 +1,69 @@
+name: 08-02 Vars · Inputs · Env — Override Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      DEMO_VAR:
+        description: "Opcjonalne wejście (inputs) do przysłonięcia wartości z vars"
+        required: false
+        default: "from_input_default"
+
+env:
+  DEMO_VAR: ${{ vars.DEMO_VAR }}
+
+jobs:
+  # ---------- Job A: env z poziomu workflow (z vars) ----------
+  A_workflow_env_from_vars:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1) Baseline — workflow env pochodzi z vars
+        run: |
+          echo "vars.DEMO_VAR = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR = $DEMO_VAR"
+
+      - name: 2) STEP override — przysłonięcie tylko w tym kroku
+        env:
+          DEMO_VAR: "from_step_env_A"
+        run: |
+          echo "vars.DEMO_VAR = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR = $DEMO_VAR"
+
+      - name: 3) Po kroku — wartość wraca do workflow env
+        run: |
+          echo "vars.DEMO_VAR = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR = $DEMO_VAR"
+
+  # ---------- Job B: env z poziomu joba (z inputs) ----------
+  B_job_env_from_inputs:
+    runs-on: ubuntu-latest
+    env:
+      DEMO_VAR: ${{ inputs.DEMO_VAR }}
+    steps:
+      - name: 1) Job-level override — wartość z inputs
+        run: |
+          echo "vars.DEMO_VAR = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR = $DEMO_VAR"
+
+      - name: 2) STEP override — przysłonięcie tylko w tym kroku
+        env:
+          DEMO_VAR: "from_step_env_B"
+        run: |
+          echo "vars.DEMO_VAR = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR = $DEMO_VAR"
+
+      - name: 3) Po kroku — wartość wraca do job env (inputs)
+        run: |
+          echo "vars.DEMO_VAR = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR = $DEMO_VAR"
+
+  # ---------- Job C: inputs z fallbackiem do vars ----------
+  C_mix_vars_inputs_fallback:
+    runs-on: ubuntu-latest
+    env:
+      DEMO_VAR: ${{ inputs.DEMO_VAR || vars.DEMO_VAR }}
+    steps:
+      - name: 1) Mix — inputs > vars (jeśli podane)
+        run: |
+          echo "inputs.DEMO_VAR = ${{ inputs.DEMO_VAR }}"
+          echo "vars.DEMO_VAR   = ${{ vars.DEMO_VAR }}"
+          echo "env  DEMO_VAR   = $DEMO_VAR"
