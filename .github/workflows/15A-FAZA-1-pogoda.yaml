@@ -1,0 +1,311 @@
+name: 15A FAZA-1 — Pogoda WWW i API
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main] # przy zmianie FAZA1_DEPLOY_BRANCH dostosuj również tę listę
+    paths:
+      - 'CWICZENIA/15A-Cwiczenia-pipeline-gha/pogoda_python_flusk/**'
+      - '.github/workflows/15A-FAZA-1-pogoda.yaml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   DOCKERHUB_USERNAME    = piotrskoska (albo Twój login Docker Hub)
+#   DOCKER_IMAGE_NAME     = python_pogoda
+#   FAZA1_IMAGE_TAG       = faza1
+#   FAZA1_APP_PORT        = 18090
+#   FAZA1_CONTAINER_NAME  = pogoda_api_faza1
+#   FAZA1_WEATHER_CITY    = Warsaw
+#   FAZA1_DEPLOY_BRANCH   = main
+# Repository secrets: DOCKERHUB_TOKEN, OPENWEATHER_API_KEY
+# APP_DIR, HUB_IMAGE_BASE, CI_IMAGE i digest są wyliczane przez workflow — nie twórz dla nich Variables.
+env:
+  APP_DIR: ./CWICZENIA/15A-Cwiczenia-pipeline-gha/pogoda_python_flusk
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'piotrskoska' }}
+  HUB_IMAGE_BASE: ${{ vars.DOCKERHUB_USERNAME || 'piotrskoska' }}/${{ vars.DOCKER_IMAGE_NAME || 'python_pogoda' }}
+  CI_IMAGE: ${{ vars.DOCKERHUB_USERNAME || 'piotrskoska' }}/${{ vars.DOCKER_IMAGE_NAME || 'python_pogoda' }}:ci-${{ github.sha }}
+  IMAGE_TAG: ${{ vars.FAZA1_IMAGE_TAG || 'faza1' }}
+  APP_PORT: ${{ vars.FAZA1_APP_PORT || '18090' }}
+  CONTAINER_NAME: ${{ vars.FAZA1_CONTAINER_NAME || 'pogoda_api_faza1' }}
+  WEATHER_CITY: ${{ vars.FAZA1_WEATHER_CITY || 'Warsaw' }}
+
+jobs:
+  # ============================ 1. BUILD ============================
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CI image (no push, no secrets)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          tags: ${{ env.CI_IMAGE }}
+          load: true
+          push: false
+
+      - name: Verify image metadata does not contain the API key
+        run: |
+          echo "Obraz: $CI_IMAGE"
+          echo "Architektura: $(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$CI_IMAGE")"
+          if docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CI_IMAGE" \
+              | grep -q '^OPENWEATHER_API_KEY='; then
+            echo "::error::Config.Env obrazu zawiera OPENWEATHER_API_KEY. Klucz nie może być wbudowany w obraz."
+            exit 1
+          fi
+          echo "OK - obraz nie zawiera OPENWEATHER_API_KEY w Config.Env."
+
+      - name: Save image to tar
+        run: docker save "$CI_IMAGE" -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: faza1-weather-image
+          path: image.tar
+          retention-days: 1
+
+  # ============================ 2. TEST ============================
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      CI_CONTAINER_NAME: pogoda_api_faza1_ci
+      CI_BASE_URL: http://127.0.0.1:18090
+
+    steps:
+      - name: Checkout repository (smoke test helper)
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: faza1-weather-image
+
+      - name: Load Docker image
+        run: docker load -i image.tar
+
+      - name: Run test container with real API key
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: |
+          if [ -z "$OPENWEATHER_API_KEY" ]; then
+            echo "::error::Brak Repository secret OPENWEATHER_API_KEY."
+            exit 1
+          fi
+          docker run -d \
+            --name "$CI_CONTAINER_NAME" \
+            -p 127.0.0.1:18090:8080 \
+            -e OPENWEATHER_API_KEY \
+            "$CI_IMAGE"
+
+      - name: Wait for /healthz
+        run: |
+          curl --fail --silent --show-error \
+            --retry 20 --retry-all-errors --retry-delay 2 \
+            --retry-max-time 90 --max-time 5 \
+            --output /dev/null \
+            "$CI_BASE_URL/healthz"
+          echo "Aplikacja odpowiada na /healthz."
+
+      - name: Smoke test WWW + real OpenWeatherMap API
+        run: |
+          python3 "${APP_DIR}/tests/smoke_test.py" \
+            --base-url "$CI_BASE_URL" \
+            --city "$WEATHER_CITY"
+
+      - name: Show test container logs on failure
+        if: failure()
+        run: docker logs "$CI_CONTAINER_NAME" || true
+
+      - name: Remove test container
+        if: always()
+        run: docker rm --force "$CI_CONTAINER_NAME" || true
+
+  # ============================ 3. PUBLISH (bez przebudowy) ============================
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: test
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref_name == (vars.FAZA1_DEPLOY_BRANCH || 'main')
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Download tested image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: faza1-weather-image
+
+      - name: Load tested image
+        run: docker load -i image.tar
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tag and push the tested image
+        id: push
+        run: |
+          main_ref="${HUB_IMAGE_BASE}:${IMAGE_TAG}"
+          sha_ref="${HUB_IMAGE_BASE}:${IMAGE_TAG}-${GITHUB_SHA}"
+
+          docker tag "$CI_IMAGE" "$main_ref"
+          docker tag "$CI_IMAGE" "$sha_ref"
+
+          push_log="$(mktemp)"
+          docker push "$main_ref" | tee -a "$push_log"
+          docker push "$sha_ref"  | tee -a "$push_log"
+
+          # Digest odczytany z potwierdzeń obu docker push — musi być dokładnie jeden.
+          digests="$(grep -oE 'digest: sha256:[0-9a-f]{64}' "$push_log" | awk '{print $2}' | sort -u)"
+          count="$(printf '%s' "$digests" | grep -c '^sha256:' || true)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Oczekiwano jednego digestu z docker push, znaleziono: ${count}."
+            printf '%s\n' "$digests"
+            exit 1
+          fi
+
+          echo "digest=$digests" >> "$GITHUB_OUTPUT"
+          echo "Opublikowano: $main_ref oraz $sha_ref"
+          echo "Digest: $digests"
+
+  # ============================ 4. DEPLOY (self-hosted) ============================
+  deploy:
+    runs-on: [self-hosted, linux]
+    needs: build-and-push
+    timeout-minutes: 15
+    concurrency:
+      group: pogoda-faza1-deploy
+      cancel-in-progress: false
+    env:
+      IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image_digest }}
+
+    steps:
+      - name: Prepare private DOCKER_CONFIG
+        run: |
+          docker_config="$(mktemp -d "${RUNNER_TEMP}/faza1-docker-config.XXXXXX")"
+          chmod 700 "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          echo "Prywatny DOCKER_CONFIG: $docker_config"
+
+      - name: Checkout repository (smoke test helper)
+        uses: actions/checkout@v4
+
+      - name: Validate deploy configuration
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: |
+          for variable in APP_PORT CONTAINER_NAME IMAGE_DIGEST WEATHER_CITY OPENWEATHER_API_KEY; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::Brak wymaganej konfiguracji: $variable"
+              exit 1
+            fi
+          done
+
+          if ! [[ "$APP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( APP_PORT > 65535 )); then
+            echo "::error::FAZA1_APP_PORT musi być liczbą od 1 do 65535 (jest: '$APP_PORT')."
+            exit 1
+          fi
+
+          if ! [[ "$CONTAINER_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+            echo "::error::FAZA1_CONTAINER_NAME może zawierać tylko litery, cyfry, _ oraz - i zaczynać się literą lub cyfrą."
+            exit 1
+          fi
+
+          if ! [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Niepoprawny digest obrazu: '$IMAGE_DIGEST'."
+            exit 1
+          fi
+
+          if [ "$(uname -m)" != "x86_64" ]; then
+            echo "::error::Runner ma architekturę $(uname -m), a obraz jest zbudowany dla linux/amd64."
+            exit 1
+          fi
+
+          echo "IMAGE_REFERENCE=${HUB_IMAGE_BASE}@${IMAGE_DIGEST}" >> "$GITHUB_ENV"
+
+          echo "Obraz:    ${HUB_IMAGE_BASE}@${IMAGE_DIGEST}"
+          echo "Tag:      ${IMAGE_TAG}"
+          echo "Port:     ${APP_PORT} -> 8080"
+          echo "Kontener: ${CONTAINER_NAME}"
+          echo "Miasto:   ${WEATHER_CITY}"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          logout: false
+
+      - name: Pull published image by digest
+        run: docker pull "$IMAGE_REFERENCE"
+
+      - name: Remove previous container if it exists
+        run: |
+          # Nazwa została zweryfikowana wyżej, więc można jej bezpiecznie użyć w filtrze regex.
+          existing_container="$(docker container ls --all --quiet --filter "name=^/${CONTAINER_NAME}$")"
+          if [ -n "$existing_container" ]; then
+            echo "Usuwam poprzedni kontener ${CONTAINER_NAME} (${existing_container})"
+            docker rm --force "$existing_container"
+          else
+            echo "Brak poprzedniego kontenera ${CONTAINER_NAME}"
+          fi
+
+      - name: Run published container
+        env:
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+        run: |
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart unless-stopped \
+            -p "${APP_PORT}:8080" \
+            -e OPENWEATHER_API_KEY \
+            "$IMAGE_REFERENCE"
+
+      - name: Wait for /healthz and verify container state
+        run: |
+          curl --fail --silent --show-error \
+            --retry 20 --retry-all-errors --retry-delay 2 \
+            --retry-max-time 90 --max-time 5 \
+            --output /dev/null \
+            "http://127.0.0.1:${APP_PORT}/healthz"
+          test "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME")" = true
+          echo "Kontener ${CONTAINER_NAME} działa i odpowiada na /healthz."
+
+      - name: Smoke test deployed WWW + real OpenWeatherMap API
+        run: |
+          python3 "${APP_DIR}/tests/smoke_test.py" \
+            --base-url "http://127.0.0.1:${APP_PORT}" \
+            --city "$WEATHER_CITY"
+
+      - name: Show deployed container logs on failure
+        if: failure()
+        run: docker logs "$CONTAINER_NAME" || true
+
+      - name: Docker logout and remove private DOCKER_CONFIG
+        if: always()
+        run: |
+          prefix="${RUNNER_TEMP}/faza1-docker-config."
+          if [ -n "${DOCKER_CONFIG:-}" ] && [[ "$DOCKER_CONFIG" == "$prefix"* ]] && [ -d "$DOCKER_CONFIG" ]; then
+            docker logout || true
+            rm -f "${DOCKER_CONFIG}/config.json"
+            rmdir "$DOCKER_CONFIG" || echo "::warning::Katalog $DOCKER_CONFIG nie jest pusty - pozostawiony."
+            echo "Usunięto lokalne poświadczenia Docker Hub."
+          else
+            echo "Brak prywatnego DOCKER_CONFIG do posprzątania."
+          fi
