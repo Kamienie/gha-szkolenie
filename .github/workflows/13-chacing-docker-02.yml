@@ -2,8 +2,9 @@ name: 13-02 Build Docker image with actions/cache 02
 
 on:
   push:
-    branches: [cw13]
+    branches: [ cw13 ]
   pull_request:
+    branches: [ cw13 ]
   workflow_dispatch:
 
 defaults:
@@ -14,6 +15,7 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -21,11 +23,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Cache dla katalogu z warstwami buildx
       - name: Cache Docker layers
         uses: actions/cache@v4
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-docker-buildx-${{ hashFiles('CWICZENIA/13-caching/docker01/Dockerfile', 'CWICZENIA/13-caching/docker01/index.html') }}
+          path: |
+            /tmp/.buildx-cache
+          key: ${{ runner.os }}-docker-buildx-${{ hashFiles('Dockerfile', 'index.html') }}
           restore-keys: |
             ${{ runner.os }}-docker-buildx-
 
@@ -34,7 +38,11 @@ jobs:
         with:
           context: ./CWICZENIA/13-caching/docker01
           file: ./CWICZENIA/13-caching/docker01/Dockerfile
+
+          # Bez pushowania do rejestru – przykład tylko do builda
           push: false
           tags: example-nginx:cache-actions-layers
+
+          # Wskazanie katalogu z cache’em buildx
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
